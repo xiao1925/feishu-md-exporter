@@ -1,0 +1,14 @@
+{
+  "name": "feishu-md-exporter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "convert:docx": "node scripts/convert-docx.js",
+    "repair:images": "node scripts/repair-markdown-images.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
