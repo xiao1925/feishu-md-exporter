@@ -33,7 +33,7 @@
 当前默认 Pandoc 路径：
 
 ```text
-C:\Users\xfli43\AppData\Local\Programs\Pandoc\pandoc-3.9.0.2\pandoc.exe
+C:\Users\AppData\Local\Programs\Pandoc\pandoc-3.9.0.2\pandoc.exe
 ```
 
 如果你的 Pandoc 路径不同，可以在页面里修改，也可以在命令行参数里传入。
