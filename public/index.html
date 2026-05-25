@@ -3,30 +3,58 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>飞书文档转 Markdown</title>
+    <title>飞书云文档一键导出 md 文件</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <main class="shell">
-      <section class="panel">
-        <div class="heading">
+    <main class="page">
+      <section class="hero">
+        <div class="hero-copy">
           <p class="eyebrow">Feishu Markdown Exporter</p>
-          <h1>飞书云文档转本地 Markdown</h1>
-          <p class="summary">从飞书手动导出 DOCX 后，在本机生成 Markdown 文件和本地图片目录。</p>
+          <h1>飞书云文档一键导出 md 文件</h1>
+          <p class="summary">连接企业自建应用，直接读取飞书云文档内容、图片和表格，在本机生成 Markdown 或 MK 文件。</p>
         </div>
 
-        <form id="docxForm" class="form">
-          <div class="file-row">
-            <label>
-              <span>DOCX 文件（可多选）</span>
-              <input name="docxFile" type="file" multiple accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
-            </label>
-            <span class="or">或</span>
-            <label>
-              <span>本机 DOCX 路径</span>
-              <input name="docxPath" type="text" placeholder="D:\Downloads\飞书导出文档.docx">
-            </label>
+        <div class="nature" aria-hidden="true">
+          <span class="leaf leaf-a"></span>
+          <span class="leaf leaf-b"></span>
+          <span class="leaf leaf-c"></span>
+        </div>
+      </section>
+
+      <section class="workspace" aria-label="云文档导出">
+        <form id="exportForm" class="export-card">
+          <div class="form-heading">
+            <p class="eyebrow">One-step export</p>
+            <h2>云文档导出</h2>
+            <p>默认连接企业定制飞书 OpenAPI，支持新版文档、知识库文档、图片、普通表格和电子表格块。</p>
           </div>
+
+          <label class="wide">
+            <span>飞书文档链接</span>
+            <input name="docUrl" type="url" placeholder="https://xxx.feishu.cn/docx/..." autocomplete="off">
+          </label>
+
+          <details class="app-settings">
+            <summary>应用配置</summary>
+            <div class="settings-grid">
+              <div class="grid">
+                <label>
+                  <span>应用 App ID</span>
+                  <input name="appId" type="password" autocomplete="off" placeholder="cli_xxx">
+                </label>
+                <label>
+                  <span>应用 App Secret</span>
+                  <input name="appSecret" type="password" autocomplete="off" placeholder="可用环境变量代替">
+                </label>
+              </div>
+
+              <label class="wide">
+                <span>OpenAPI 根地址</span>
+                <input name="apiBaseUrl" type="url" value="https://open.xfchat.iflytek.com" placeholder="https://open.xfchat.iflytek.com">
+              </label>
+            </div>
+          </details>
 
           <div class="grid">
             <label>
@@ -42,63 +70,23 @@
             </label>
           </div>
 
-          <label>
-            <span>Pandoc 路径</span>
-            <input name="pandocPath" type="text" value="C:\Users\xfli43\AppData\Local\Programs\Pandoc\pandoc-3.9.0.2\pandoc.exe">
-          </label>
-
-          <button id="docxButton" type="submit">转换 DOCX</button>
+          <div class="actions">
+            <button id="submitButton" type="submit">导出 md 文件</button>
+          </div>
         </form>
 
-        <details class="legacy">
-          <summary>仍然使用飞书开放平台直连</summary>
-          <form id="exportForm" class="form">
-            <label>
-              <span>飞书文档链接</span>
-              <input name="docUrl" type="url" placeholder="https://xxx.feishu.cn/docx/...">
-            </label>
-
-            <div class="grid">
-              <label>
-                <span>App ID</span>
-                <input name="appId" type="password" autocomplete="off" placeholder="cli_xxx">
-              </label>
-              <label>
-                <span>App Secret</span>
-                <input name="appSecret" type="password" autocomplete="off" placeholder="可用环境变量代替">
-              </label>
-            </div>
-
-            <div class="grid">
-              <label>
-                <span>保存目录</span>
-                <input name="outputDir" type="text" value="D:\work space\feishu-md-exporter\exports">
-              </label>
-              <label>
-                <span>文件后缀</span>
-                <select name="extension">
-                  <option value="md">.md</option>
-                  <option value="mk">.mk</option>
-                </select>
-              </label>
-            </div>
-
-            <button id="submitButton" type="submit">从飞书接口导出</button>
-          </form>
-        </details>
-
-        <div id="status" class="status" hidden></div>
+        <aside class="guide">
+          <h2>导出内容</h2>
+          <ul>
+            <li>新版文档正文、标题、列表和引用</li>
+            <li>图片下载到本地 assets 目录</li>
+            <li>普通表格与电子表格块转 Markdown 表格</li>
+            <li>知识库链接自动解析为文档内容</li>
+          </ul>
+        </aside>
       </section>
 
-      <aside class="notes">
-        <h2>推荐流程</h2>
-        <ol>
-          <li>在企业定制飞书里打开云文档。</li>
-          <li>使用飞书自带导出功能下载为 DOCX。</li>
-          <li>在本页面选择该 DOCX，或填写它的本机完整路径。</li>
-          <li>设置保存目录后转换，图片会进入同级 assets 目录。</li>
-        </ol>
-      </aside>
+      <div id="status" class="status" hidden></div>
     </main>
 
     <script src="/app.js"></script>

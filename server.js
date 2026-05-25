@@ -8,7 +8,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 const defaultPort = Number(process.env.PORT || 4177);
 
-const FEISHU_API = "https://open.feishu.cn";
+const FALLBACK_FEISHU_API = "https://open.xfchat.iflytek.com";
+const DEFAULT_FEISHU_API = normalizeFeishuApiBase(process.env.FEISHU_API_BASE || FALLBACK_FEISHU_API);
 
 const BLOCK_TYPES = {
   1: "page",
@@ -27,10 +28,19 @@ const BLOCK_TYPES = {
   14: "code",
   15: "quote",
   17: "todo",
+  18: "bitable",
   19: "callout",
+  20: "chat_card",
+  21: "diagram",
   22: "divider",
   23: "file",
-  28: "image",
+  24: "grid",
+  25: "grid_column",
+  26: "iframe",
+  27: "image",
+  28: "isv",
+  29: "mindnote",
+  30: "sheet",
   32: "table",
   33: "table_cell",
   34: "view",
@@ -132,6 +142,20 @@ function uniqueBatchTitle(title, counts) {
   return current === 0 ? title : `${title} ${current + 1}`;
 }
 
+function normalizeFeishuApiBase(input) {
+  const value = String(input || "").trim();
+  if (!value) return FALLBACK_FEISHU_API;
+
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`飞书 API 地址无效：${value}`);
+  }
+
+  return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+}
+
 async function serveStatic(req, res) {
   const url = new URL(req.url, "http://localhost");
   const requested = url.pathname === "/" ? "/index.html" : url.pathname;
@@ -160,12 +184,32 @@ async function serveStatic(req, res) {
   }
 }
 
-async function feishuFetch(endpoint, { method = "GET", token, body, raw = false } = {}) {
+function buildFeishuErrorMessage(endpoint, apiBaseUrl, response, payload) {
+  const code = payload?.code ?? response.status;
+  const message = payload?.msg || payload?.message || response.statusText;
+  const requestId = response.headers.get("x-tt-logid") || response.headers.get("x-request-id") || payload?.request_id || "";
+  const suffix = requestId ? ` [request_id: ${requestId}]` : "";
+  const baseMessage = `飞书接口错误：${message} (code: ${code})${suffix}`;
+
+  if (code === 10014 && endpoint.includes("/auth/v3/tenant_access_token/internal")) {
+    return `${baseMessage}。当前项目走的是“企业自建应用 -> tenant_access_token/internal”鉴权链路，` +
+      `当前请求的开放平台地址是 ${apiBaseUrl}。请确认这个 App ID 属于该环境；如果你使用的是企业定制飞书/私有化环境，` +
+      "请把 API 地址改成对应的 OpenAPI 根地址。";
+  }
+
+  if (code === 10013 && endpoint.includes("/auth/v3/tenant_access_token/internal")) {
+    return `${baseMessage}。请检查 App Secret 是否正确，以及当前应用是否为可直接换 tenant_access_token 的企业自建应用。`;
+  }
+
+  return baseMessage;
+}
+
+async function feishuFetch(endpoint, { method = "GET", token, body, raw = false, returnEnvelope = false, apiBaseUrl = DEFAULT_FEISHU_API } = {}) {
   const headers = {};
   if (token) headers.authorization = `Bearer ${token}`;
   if (body) headers["content-type"] = "application/json; charset=utf-8";
 
-  const response = await fetch(`${FEISHU_API}${endpoint}`, {
+  const response = await fetch(`${apiBaseUrl}${endpoint}`, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined
@@ -187,27 +231,39 @@ async function feishuFetch(endpoint, { method = "GET", token, body, raw = false 
   }
 
   if (!response.ok || payload.code !== 0) {
-    const message = payload.msg || payload.message || response.statusText;
-    throw new Error(`飞书接口错误：${message} (code: ${payload.code ?? response.status})`);
+    throw new Error(buildFeishuErrorMessage(endpoint, apiBaseUrl, response, payload));
   }
 
-  return payload.data || {};
+  return returnEnvelope ? payload : (payload.data ?? payload);
 }
 
-async function getTenantToken(appId, appSecret) {
-  const data = await feishuFetch("/open-apis/auth/v3/tenant_access_token/internal", {
+async function getTenantToken(appId, appSecret, apiBaseUrl) {
+  const payload = await feishuFetch("/open-apis/auth/v3/tenant_access_token/internal", {
     method: "POST",
+    returnEnvelope: true,
+    apiBaseUrl,
     body: {
       app_id: appId,
       app_secret: appSecret
     }
   });
 
-  if (!data.tenant_access_token) {
-    throw new Error("没有拿到 tenant_access_token，请检查 App ID/Secret。");
+  const tenantAccessToken = payload.tenant_access_token || payload.data?.tenant_access_token || "";
+  if (!tenantAccessToken) {
+    const keys = Object.keys(payload || {}).filter((key) => key !== "msg");
+    throw new Error(`没有拿到 tenant_access_token。鉴权接口已返回成功，但响应字段不符合预期：${keys.join(", ") || "空响应"}`);
   }
 
-  return data.tenant_access_token;
+  return {
+    tenantAccessToken,
+    requestId: payload.request_id || payload.data?.request_id || ""
+  };
+}
+
+function maskAppId(appId) {
+  const value = String(appId || "").trim();
+  if (value.length <= 8) return value || "未填写";
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
 }
 
 function parseFeishuUrl(input) {
@@ -238,7 +294,7 @@ function parseFeishuUrl(input) {
   throw new Error("没有从链接里识别到 docx/wiki 文档 token。");
 }
 
-async function resolveDocument(linkInfo, token) {
+async function resolveDocument(linkInfo, token, apiBaseUrl) {
   if (linkInfo.kind === "docx") {
     return { documentId: linkInfo.token, sourceKind: "docx" };
   }
@@ -248,7 +304,8 @@ async function resolveDocument(linkInfo, token) {
   }
 
   const data = await feishuFetch(`/open-apis/wiki/v2/spaces/get_node?token=${encodeURIComponent(linkInfo.token)}`, {
-    token
+    token,
+    apiBaseUrl
   });
   const node = data.node || data;
   if (!node.obj_token || node.obj_type !== "docx") {
@@ -257,7 +314,7 @@ async function resolveDocument(linkInfo, token) {
   return { documentId: node.obj_token, sourceKind: "wiki" };
 }
 
-async function listBlocks(documentId, token) {
+async function listBlocks(documentId, token, apiBaseUrl) {
   const blocks = [];
   let pageToken = "";
 
@@ -269,7 +326,8 @@ async function listBlocks(documentId, token) {
     if (pageToken) query.set("page_token", pageToken);
 
     const data = await feishuFetch(`/open-apis/docx/v1/documents/${encodeURIComponent(documentId)}/blocks?${query}`, {
-      token
+      token,
+      apiBaseUrl
     });
 
     blocks.push(...(data.items || []));
@@ -392,11 +450,12 @@ function contentDispositionFilename(headerValue) {
   return ascii ? ascii[1] : "";
 }
 
-async function downloadMedia(fileToken, token, assetsDir, index, warnings) {
+async function downloadMedia(fileToken, token, assetsDir, index, warnings, apiBaseUrl) {
   try {
     const response = await feishuFetch(`/open-apis/drive/v1/medias/${encodeURIComponent(fileToken)}/download`, {
       token,
-      raw: true
+      raw: true,
+      apiBaseUrl
     });
     const buffer = Buffer.from(await response.arrayBuffer());
     const contentType = response.headers.get("content-type")?.split(";")[0].toLowerCase();
@@ -419,7 +478,100 @@ function indentLines(markdown, spaces) {
     .join("\n");
 }
 
-async function renderBlocks({ blocks, token, assetsDir, warnings }) {
+function escapeTableCell(value) {
+  return String(value || "")
+    .replace(/\|/g, "\\|")
+    .replace(/\r?\n+/g, "<br>")
+    .trim();
+}
+
+function tableSize(block, cellCount) {
+  const table = block.table || {};
+  const property = table.property || table;
+  const rows = Number(property.row_size || property.row_count || table.row_size || table.row_count || 0);
+  const columns = Number(property.column_size || property.column_count || table.column_size || table.column_count || 0);
+
+  if (rows > 0 && columns > 0) return { rows, columns };
+  if (columns > 0) return { rows: Math.ceil(cellCount / columns), columns };
+  if (rows > 0) return { rows, columns: Math.ceil(cellCount / rows) };
+  return { rows: cellCount ? 1 : 0, columns: cellCount || 0 };
+}
+
+function columnName(index) {
+  let value = Number(index);
+  let name = "";
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    value = Math.floor((value - 1) / 26);
+  }
+  return name || "A";
+}
+
+function parseSheetToken(token) {
+  const value = String(token || "").trim();
+  const splitIndex = value.lastIndexOf("_");
+  if (splitIndex <= 0 || splitIndex === value.length - 1) return null;
+  return {
+    spreadsheetToken: value.slice(0, splitIndex),
+    sheetId: value.slice(splitIndex + 1)
+  };
+}
+
+function sheetBlockSize(block) {
+  const sheet = block.sheet || {};
+  const rows = Number(sheet.row_size || sheet.row_count || 0);
+  const columns = Number(sheet.column_size || sheet.column_count || 0);
+  return {
+    rows: rows > 0 ? rows : 300,
+    columns: columns > 0 ? columns : 52,
+    inferred: !(rows > 0 && columns > 0)
+  };
+}
+
+function sheetValueToText(value) {
+  if (value == null) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(sheetValueToText).filter(Boolean).join("");
+  if (typeof value === "object") {
+    if (value.link != null && value.text != null) return `[${sheetValueToText(value.text)}](${value.link})`;
+    if (value.text != null) return sheetValueToText(value.text);
+    if (value.name != null) return sheetValueToText(value.name);
+    if (value.fileToken || value.file_token) return "[图片]";
+    return Object.values(value).map(sheetValueToText).filter(Boolean).join(" ");
+  }
+  return String(value);
+}
+
+function trimSheetValues(values) {
+  const rows = values.map((row) => Array.isArray(row) ? row.map((cell) => escapeTableCell(sheetValueToText(cell))) : []);
+
+  while (rows.length && rows[rows.length - 1].every((cell) => !cell)) rows.pop();
+  const columnCount = rows.reduce((max, row) => Math.max(max, row.length), 0);
+  let lastColumn = columnCount - 1;
+  while (lastColumn >= 0 && rows.every((row) => !row[lastColumn])) lastColumn--;
+
+  return rows.map((row) => row.slice(0, lastColumn + 1));
+}
+
+function renderMarkdownTable(rows) {
+  if (!rows.length) return "";
+  const columnCount = rows.reduce((max, row) => Math.max(max, row.length), 0);
+  if (!columnCount) return "";
+
+  const normalized = rows.map((row) => {
+    const next = row.slice();
+    while (next.length < columnCount) next.push("");
+    return next;
+  });
+  const header = normalized[0].map((cell, index) => cell || `列 ${index + 1}`);
+  const divider = header.map(() => "---");
+  return [header, divider, ...normalized.slice(1)]
+    .map((row) => `| ${row.join(" | ")} |`)
+    .join("\n");
+}
+
+async function renderBlocks({ blocks, token, assetsDir, warnings, apiBaseUrl }) {
   const byId = new Map(blocks.map((block) => [block.block_id, block]));
   const page = blocks.find((block) => getBlockKind(block) === "page") || blocks[0];
   let imageIndex = 1;
@@ -436,44 +588,99 @@ async function renderBlocks({ blocks, token, assetsDir, warnings }) {
     return rendered.join("\n\n");
   }
 
+  async function renderTable(block, depth) {
+    const cellIds = block.children || [];
+    const cells = cellIds
+      .map((childId) => byId.get(childId))
+      .filter((child) => child && getBlockKind(child) === "table_cell");
+    const { rows, columns } = tableSize(block, cells.length);
+
+    if (!cells.length) return renderChildren(block, depth + 1);
+    if (!rows || !columns) return renderChildren(block, depth + 1);
+
+    const values = [];
+    for (const cell of cells) {
+      values.push(escapeTableCell(await renderBlock(cell, depth + 1)));
+    }
+
+    while (values.length < rows * columns) values.push("");
+
+    const matrix = [];
+    for (let row = 0; row < rows; row++) {
+      matrix.push(values.slice(row * columns, row * columns + columns));
+    }
+
+    const header = matrix[0].map((cell, index) => cell || `列 ${index + 1}`);
+    const body = matrix.slice(1);
+    return renderMarkdownTable([header, ...body]);
+  }
+
+  async function renderSheet(block) {
+    const parsed = parseSheetToken(block.sheet?.token);
+    if (!parsed) {
+      warnings.push(`电子表格块 ${block.block_id} 没有识别到 sheet token。`);
+      return "";
+    }
+
+    const { rows, columns, inferred } = sheetBlockSize(block);
+    const range = `${parsed.sheetId}!A1:${columnName(columns)}${rows}`;
+    const query = new URLSearchParams({
+      valueRenderOption: "ToString",
+      dateTimeRenderOption: "FormattedString"
+    });
+    const data = await feishuFetch(
+      `/open-apis/sheets/v2/spreadsheets/${encodeURIComponent(parsed.spreadsheetToken)}/values/${encodeURIComponent(range)}?${query}`,
+      { token, apiBaseUrl }
+    );
+    const values = data.valueRange?.values || [];
+    const markdown = renderMarkdownTable(trimSheetValues(values));
+
+    if (inferred && !markdown) {
+      warnings.push(`电子表格块 ${block.block_id} 未返回行列数，已按 ${range} 范围读取。`);
+    }
+    return markdown;
+  }
+
   async function renderBlock(block, depth = 0) {
     const kind = getBlockKind(block);
     const text = renderRichText(block).trim();
-    const childMarkdown = await renderChildren(block, depth + 1);
+    const childMarkdown = () => renderChildren(block, depth + 1);
 
     if (/^heading/.test(kind)) {
       const level = Math.min(Number(kind.replace("heading", "")) || 1, 6);
-      return [`${"#".repeat(level)} ${text}`, childMarkdown].filter(Boolean).join("\n\n");
+      return [`${"#".repeat(level)} ${text}`, await childMarkdown()].filter(Boolean).join("\n\n");
     }
 
     if (kind === "text") {
-      return [text, childMarkdown].filter(Boolean).join("\n\n");
+      return [text, await childMarkdown()].filter(Boolean).join("\n\n");
     }
 
     if (kind === "bullet") {
-      const body = text || childMarkdown;
-      const nested = text && childMarkdown ? `\n${indentLines(childMarkdown, 2)}` : "";
+      const children = await childMarkdown();
+      const body = text || children;
+      const nested = text && children ? `\n${indentLines(children, 2)}` : "";
       return `${"  ".repeat(depth)}- ${body}${nested}`;
     }
 
     if (kind === "ordered") {
-      const body = text || childMarkdown;
-      const nested = text && childMarkdown ? `\n${indentLines(childMarkdown, 3)}` : "";
+      const children = await childMarkdown();
+      const body = text || children;
+      const nested = text && children ? `\n${indentLines(children, 3)}` : "";
       return `${"  ".repeat(depth)}1. ${body}${nested}`;
     }
 
     if (kind === "todo" || kind === "task") {
       const container = getTextContainer(block);
       const checked = container.checked || container.done ? "x" : " ";
-      return `- [${checked}] ${text || childMarkdown}`;
+      return `- [${checked}] ${text || await childMarkdown()}`;
     }
 
     if (kind === "quote") {
-      return `> ${(text || childMarkdown).replace(/\n/g, "\n> ")}`;
+      return `> ${(text || await childMarkdown()).replace(/\n/g, "\n> ")}`;
     }
 
     if (kind === "quote_container" || kind === "callout") {
-      const content = [text, childMarkdown].filter(Boolean).join("\n\n");
+      const content = [text, await childMarkdown()].filter(Boolean).join("\n\n");
       return content ? `> ${content.replace(/\n/g, "\n> ")}` : "";
     }
 
@@ -491,11 +698,11 @@ async function renderBlocks({ blocks, token, assetsDir, warnings }) {
       const imageToken = tokenFromObject(block.image);
       if (!imageToken) {
         warnings.push(`图片块 ${block.block_id} 没有识别到 token。`);
-        return childMarkdown;
+        return childMarkdown();
       }
-      const relativePath = await downloadMedia(imageToken, token, assetsDir, imageIndex++, warnings);
+      const relativePath = await downloadMedia(imageToken, token, assetsDir, imageIndex++, warnings, apiBaseUrl);
       const alt = text || "image";
-      return relativePath ? `![${escapeMarkdown(alt)}](${relativePath})` : childMarkdown;
+      return relativePath ? `![${escapeMarkdown(alt)}](${relativePath})` : childMarkdown();
     }
 
     if (kind === "file") {
@@ -505,14 +712,28 @@ async function renderBlocks({ blocks, token, assetsDir, warnings }) {
     }
 
     if (kind === "table") {
-      return childMarkdown;
+      return renderTable(block, depth);
     }
 
     if (kind === "table_cell") {
-      return childMarkdown || text;
+      return await childMarkdown() || text;
     }
 
-    if (childMarkdown) return childMarkdown;
+    if (kind === "grid" || kind === "grid_column") {
+      return await childMarkdown() || text;
+    }
+
+    if (kind === "sheet") {
+      return renderSheet(block);
+    }
+
+    if (kind === "bitable") {
+      warnings.push(`暂不支持直接导出多维表格块：${block.block_id}`);
+      return await childMarkdown() || text;
+    }
+
+    const children = await childMarkdown();
+    if (children) return children;
     if (text) return text;
 
     warnings.push(`跳过暂不支持的块：${kind} (${block.block_id})`);
@@ -526,6 +747,7 @@ async function exportDocument(params) {
   const appId = (params.appId || process.env.FEISHU_APP_ID || "").trim();
   const appSecret = (params.appSecret || process.env.FEISHU_APP_SECRET || "").trim();
   const docUrl = (params.docUrl || "").trim();
+  const apiBaseUrl = normalizeFeishuApiBase(params.apiBaseUrl || process.env.FEISHU_API_BASE || DEFAULT_FEISHU_API);
   const extension = params.extension === "mk" ? ".mk" : ".md";
   const warnings = [];
 
@@ -535,10 +757,11 @@ async function exportDocument(params) {
   if (!docUrl) throw new Error("请填写飞书云文档链接。");
 
   const outputBase = path.resolve(params.outputDir || path.join(__dirname, "exports"));
-  const tenantToken = await getTenantToken(appId, appSecret);
+  const authResult = await getTenantToken(appId, appSecret, apiBaseUrl);
+  const tenantToken = authResult.tenantAccessToken;
   const linkInfo = parseFeishuUrl(docUrl);
-  const { documentId, sourceKind } = await resolveDocument(linkInfo, tenantToken);
-  const blocks = await listBlocks(documentId, tenantToken);
+  const { documentId, sourceKind } = await resolveDocument(linkInfo, tenantToken, apiBaseUrl);
+  const blocks = await listBlocks(documentId, tenantToken, apiBaseUrl);
   const title = collectTitle(blocks, documentId);
   const exportDir = path.join(outputBase, sanitizeSegment(title, documentId));
   const assetsDir = path.join(exportDir, "assets");
@@ -549,7 +772,8 @@ async function exportDocument(params) {
     blocks,
     token: tenantToken,
     assetsDir,
-    warnings
+    warnings,
+    apiBaseUrl
   });
 
   const fileName = `${sanitizeSegment(title, "document")}${extension}`;
@@ -563,7 +787,27 @@ async function exportDocument(params) {
     outputDir: exportDir,
     markdownPath,
     imageCount: (await fs.readdir(assetsDir)).length,
-    warnings
+    warnings,
+    apiBaseUrl,
+    requestId: authResult.requestId
+  };
+}
+
+async function testAuth(params) {
+  const appId = (params.appId || process.env.FEISHU_APP_ID || "").trim();
+  const appSecret = (params.appSecret || process.env.FEISHU_APP_SECRET || "").trim();
+  const apiBaseUrl = normalizeFeishuApiBase(params.apiBaseUrl || process.env.FEISHU_API_BASE || DEFAULT_FEISHU_API);
+
+  if (!appId || !appSecret) {
+    throw new Error("请填写飞书应用的 App ID 和 App Secret，或设置 FEISHU_APP_ID / FEISHU_APP_SECRET 环境变量。");
+  }
+
+  const authResult = await getTenantToken(appId, appSecret, apiBaseUrl);
+  return {
+    ok: true,
+    apiBaseUrl,
+    appIdMasked: maskAppId(appId),
+    requestId: authResult.requestId
   };
 }
 
@@ -572,6 +816,17 @@ async function handleExport(req, res) {
     const rawBody = await readBody(req);
     const params = JSON.parse(rawBody.toString("utf8") || "{}");
     const result = await exportDocument(params);
+    sendJson(res, 200, { ok: true, result });
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message });
+  }
+}
+
+async function handleTestAuth(req, res) {
+  try {
+    const rawBody = await readBody(req);
+    const params = JSON.parse(rawBody.toString("utf8") || "{}");
+    const result = await testAuth(params);
     sendJson(res, 200, { ok: true, result });
   } catch (error) {
     sendJson(res, 400, { ok: false, error: error.message });
@@ -672,6 +927,11 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "POST" && url.pathname === "/api/export") {
     await handleExport(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/test-auth") {
+    await handleTestAuth(req, res);
     return;
   }
 
